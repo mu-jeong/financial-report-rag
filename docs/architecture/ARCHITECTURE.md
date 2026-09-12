@@ -37,6 +37,10 @@ Streamlit GUI의 사이드바 데이터 업데이트는 `data_update_jobs`를 �
 
 `src/core/report_crawler.py`는 리포트 카테고리와 날짜 범위를 기준으로 PDF를 다운로드합니다.
 
+네이버 증권의 새 리서치 화면(`stock.naver.com/research`)에 맞춰 `/api/stockSecurity/researches/v2/{category}`에서 목록을, `/{category}/{nid}`에서 상세 정보의 `attachUrl`을 조회합니다. 지원 카테고리는 `company`, `industry`, `economy`이며, 날짜 필터와 `index`/`hasNext` 기반 페이지 이동을 사용합니다. 이전 `finance.naver.com` HTML 표 파서는 사용하지 않습니다. 이 API는 사이트 내부 경로이므로 응답 구조 변경 시 수집 코드를 점검해야 합니다.
+
+파일명은 기존 `{유형}_{날짜}_{대상}_{증권사}_{제목}.pdf` 규칙을 유지합니다. HTTP 성공 여부와 실제 PDF 내용을 검증한 후 임시 파일을 최종 경로로 교체하고, 유효한 기존 PDF는 재다운로드하지 않습니다. 일부 증권사 첨부 주소는 PDF가 아닌 웹페이지를 반환합니다. 이런 항목이나 상세 조회 실패는 성공 건수에 넣지 않으며, 다른 항목의 다운로드를 진행한 뒤 작업 실패로 보고합니다. 잘못된 목록 응답도 오류로 처리하고, 정상적인 빈 목록만 `0건`으로 처리합니다.
+
 주요 설정은 `src/configs/settings.py`의 `CONFIG_SPECS`에서 단일 관리합니다. 대표적으로 `CRAWLER_CATEGORIES`, `CRAWLER_MODE`, `CRAWLER_TARGET_DATE`, `CRAWLER_TARGET_COUNT`, `CRAWLER_LOOKBACK_DAYS`, `CRAWLER_MAX_LOOKBACK_DAYS`가 있으며 `.env.example`은 이 정의에서 자동 생성됩니다.
 
 특정 날짜에 데이터가 부족해도 이전 날짜를 이어서 탐색해 목표 개수 또는 최대 lookback 범위까지 수집합니다.

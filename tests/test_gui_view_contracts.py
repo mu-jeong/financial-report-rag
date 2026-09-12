@@ -27,6 +27,7 @@ SIDEBAR_VIEWS_PATH = GUI_DIR / "sidebar_views.py"
 CHAT_JOB_FUNCTIONS = {
     "_chat_job_registry",
     "_record_chat_job_event",
+    "_chat_job_owner_id",
     "consume_chat_job_events",
     "_queue_chat_job_toast",
     "show_queued_chat_job_toasts",
@@ -1175,6 +1176,7 @@ def test_warming_engine_queues_exactly_one_chat_worker():
                 lambda *args: exchanges.append(args) or (3, 7)
             ),
             "get_chat_history": lambda thread_id: [("사용자", "이전 질문")],
+            "_chat_job_owner_id": lambda: "owner-a",
             "_chat_job_registry": lambda: registry,
             "_run_chat_response_job": worker_target,
             "PendingSearchEngineQuestionError": PendingQuestionError,
@@ -1208,6 +1210,7 @@ def test_warming_engine_queues_exactly_one_chat_worker():
     assert worker.started is True
     assert worker.daemon is True
     assert worker.name == "chat-response-job-1234"
+    assert worker.kwargs["owner_id"] == "owner-a"
     assert worker.kwargs["chat_history"] == [("사용자", "이전 질문")]
 
     render_tree = ast.parse(
@@ -1289,6 +1292,7 @@ def test_chat_worker_start_failure_releases_queue_and_marks_message_failed():
                 lambda *args: exchanges.append(args) or (3, 7)
             ),
             "get_chat_history": lambda thread_id: [],
+            "_chat_job_owner_id": lambda: "owner-a",
             "update_message": lambda *args: updates.append(args),
             "_record_chat_job_event": (
                 lambda event, target_registry=None: events.append(event)
@@ -1320,6 +1324,7 @@ def test_chat_worker_start_failure_releases_queue_and_marks_message_failed():
     ]
     assert events == [
         {
+            "owner_id": "owner-a",
             "status": "failed",
             "thread_id": "thread-1",
             "thread_name": "테스트 대화",
@@ -1378,6 +1383,7 @@ def test_warmup_queue_slot_releases_before_graph_answering():
 
     namespace["_run_chat_response_job"](
         job_id="job-1",
+        owner_id="owner-a",
         thread_id="thread-1",
         thread_name="테스트 대화",
         assistant_message_id=7,
@@ -1392,6 +1398,7 @@ def test_warmup_queue_slot_releases_before_graph_answering():
     assert updates[0][2]["phase"] == "answering"
     assert updates[1][2]["status"] == "failed"
     assert registry["events"] == [{
+        "owner_id": "owner-a",
         "status": "progress",
         "thread_id": "thread-1",
         "thread_name": "테스트 대화",
@@ -1687,6 +1694,7 @@ def test_warmup_queue_release_survives_progress_update_failure():
 
     namespace["_run_chat_response_job"](
         job_id="job-1",
+        owner_id="owner-a",
         thread_id="thread-1",
         thread_name="테스트 대화",
         assistant_message_id=7,
@@ -1746,6 +1754,7 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
 
     namespace["_run_chat_response_job"](
         job_id="job-1",
+        owner_id="owner-a",
         thread_id="thread-1",
         thread_name="테스트 대화",
         assistant_message_id=7,
@@ -1769,6 +1778,7 @@ def test_chat_job_failure_is_persisted_and_unlocks_the_job():
     ]
     assert events == [
         {
+            "owner_id": "owner-a",
             "status": "failed",
             "thread_id": "thread-1",
             "thread_name": "테스트 대화",
@@ -1872,6 +1882,7 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
 
     namespace["_run_chat_response_job"](
         job_id="job-1",
+        owner_id="owner-a",
         thread_id="thread-1",
         thread_name="테스트 대화",
         assistant_message_id=7,
@@ -1920,6 +1931,7 @@ def test_chat_job_success_persists_scope_monitoring_and_event():
     assert persisted["scope_notice"] == "검색 범위 안내"
     assert events == [
         {
+            "owner_id": "owner-a",
             "status": "succeeded",
             "thread_id": "thread-1",
             "thread_name": "테스트 대화",
@@ -1993,7 +2005,8 @@ def test_current_thread_completion_event_sets_anchor_and_requests_app_rerun():
         "render_chat_job_notifications",
         extra_namespace={
             "st": fake_st,
-            "consume_chat_job_events": lambda: events,
+            "_chat_job_owner_id": lambda: "owner-a",
+            "consume_chat_job_events": lambda owner_id: events,
             "_queue_chat_job_toast": queued_events.append,
             "chat_message_anchor_id": (
                 lambda message_id, fallback_index: f"chat_message_id_{message_id}"
@@ -2032,7 +2045,8 @@ def test_engine_queue_release_reruns_app_from_another_conversation():
         "render_chat_job_notifications",
         extra_namespace={
             "st": fake_st,
-            "consume_chat_job_events": lambda: [
+            "_chat_job_owner_id": lambda: "owner-a",
+            "consume_chat_job_events": lambda owner_id: [
                 {
                     "thread_id": "thread-1",
                     "assistant_message_id": 7,

@@ -92,7 +92,13 @@ class OpenRouterReranker:
         seen_indexes: set[int] = set()
         for item in results:
             index = item.get("index")
-            if not isinstance(index, int) or index < 0 or index >= len(passages):
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= len(passages)
+                or index in seen_indexes
+            ):
                 continue
             seen_indexes.add(index)
             passage = dict(passages[index])

@@ -15,11 +15,14 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import date, datetime
 from typing import Any, Callable
 
 from src.configs import config
 from src.configs.settings import BASE_DIR
+from src.core.artifact_io import atomic_write_json
+from src.retrieval.update_lock import RetrievalUpdateLock, RetrievalUpdateLockError
 
 JOB_DIR = BASE_DIR / "logs" / "data_update_jobs"
 STATUS_PATH = JOB_DIR / "status.json"
@@ -65,6 +68,35 @@ def guard_before_retrieval_write(*args, **kwargs):
 
 class ParentProcessExited(RuntimeError):
     """Raised when the GUI process that started an update job has exited."""
+
+
+class DataUpdateJobAlreadyRunning(RuntimeError):
+    """Raised when a live GUI data-update job already owns the admission slot."""
+
+
+class _JobLaunchLock(RetrievalUpdateLock):
+    """Serialize launch admission without blocking the child's retrieval lock."""
+
+    FILE_NAME = ".data-update-job-launch.guard"
+
+
+class _JobAdmissionLock(_JobLaunchLock):
+    """Give GUI callers a stable duplicate-launch error for live contention."""
+
+    def acquire(self) -> "_JobAdmissionLock":
+        deadline = time.monotonic() + 0.5
+        while True:
+            try:
+                super().acquire()
+                return self
+            except RetrievalUpdateLockError as exc:
+                if is_update_job_active(read_status()):
+                    raise DataUpdateJobAlreadyRunning(
+                        "another data update or embedding job is already starting"
+                    ) from exc
+                if not isinstance(exc.__cause__, OSError) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
 
 def _today() -> date:
@@ -194,12 +226,36 @@ def build_crawler_env(
 
 
 def _write_status(status: dict[str, Any]) -> None:
-    JOB_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         **status,
     }
-    STATUS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(STATUS_PATH, payload)
+
+
+def _write_job_status(status: dict[str, Any], *, job_id: str | None) -> bool:
+    """Write child progress only while its launch still owns the status file."""
+    if job_id is None:
+        _write_status(status)
+        return True
+    deadline = time.monotonic() + 5.0
+    while True:
+        lock = _JobLaunchLock(config.DATA_ROOT)
+        try:
+            lock.acquire()
+            break
+        except RetrievalUpdateLockError as exc:
+            if not isinstance(exc.__cause__, OSError) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+    try:
+        current = read_status()
+        if not current or current.get("job_id") != job_id:
+            return False
+        _write_status({**status, "job_id": job_id})
+        return True
+    finally:
+        lock.release()
 
 
 def read_status() -> dict[str, Any] | None:
@@ -314,6 +370,79 @@ def build_embedding_command(
     return command
 
 
+def _start_detached_job(
+    *,
+    command: list[str],
+    initial_status: dict[str, Any],
+    label: str,
+) -> dict[str, Any]:
+    """Atomically admit and launch one GUI-owned data update process."""
+    with _JobAdmissionLock(config.DATA_ROOT):
+        current = read_status()
+        if is_update_job_active(current):
+            raise DataUpdateJobAlreadyRunning(
+                "another data update or embedding job is already running"
+            )
+
+        JOB_DIR.mkdir(parents=True, exist_ok=True)
+        LOG_PATH.write_text("", encoding="utf-8")
+        parent_pid = os.getpid()
+        job_id = uuid.uuid4().hex
+        reservation = {
+            **initial_status,
+            "state": "running",
+            "phase": "launch",
+            "percent": 0,
+            "message": f"{label}: 작업 프로세스를 시작하는 중입니다.",
+            "pid": parent_pid,
+            "parent_pid": parent_pid,
+            "job_id": job_id,
+        }
+        _write_status(reservation)
+
+        child_command = [
+            *command,
+            "--parent-pid",
+            str(parent_pid),
+            "--job-id",
+            job_id,
+        ]
+        try:
+            process = subprocess.Popen(
+                child_command,
+                cwd=BASE_DIR,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **_popen_creation_kwargs(),
+            )
+        except BaseException as exc:
+            _write_status(
+                {
+                    **reservation,
+                    "state": "failed",
+                    "phase": "launch",
+                    "percent": 100,
+                    "message": f"{label}: 작업 프로세스를 시작하지 못했습니다.",
+                    "error": str(exc),
+                }
+            )
+            raise
+
+        started_status = {
+            **initial_status,
+            "pid": process.pid,
+            "parent_pid": parent_pid,
+            "job_id": job_id,
+        }
+        current = read_status()
+        if current and current.get("job_id") == job_id and current.get("phase") == "launch":
+            _write_status(started_status)
+            return started_status
+        if current and current.get("job_id") == job_id:
+            return current
+        raise RuntimeError("data update launch ownership changed unexpectedly")
+
+
 def start_embedding_job(
     *,
     label: str,
@@ -325,33 +454,19 @@ def start_embedding_job(
         allow_degraded_forward_recovery=True,
         allow_empty_preflight=True,
     )
-    JOB_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_PATH.write_text("", encoding="utf-8")
-    parent_pid = os.getpid()
     command = [sys.executable, "-m", "src.core.data_update_jobs", "embed", "--label", label]
     if retry_extraction_failures:
         command.append("--retry-extraction-failures")
-    command.extend(["--parent-pid", str(parent_pid)])
-    process = subprocess.Popen(
-        command,
-        cwd=BASE_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **_popen_creation_kwargs(),
-    )
     status = {
         "state": "running",
         "phase": "embed",
         "percent": 1,
         "message": f"{label}: 임베딩 작업을 시작했습니다.",
-        "pid": process.pid,
         "label": label,
         "retry_extraction_failures": retry_extraction_failures,
         "log_path": str(LOG_PATH),
-        "parent_pid": parent_pid,
     }
-    _write_status(status)
-    return status
+    return _start_detached_job(command=command, initial_status=status, label=label)
 
 
 def start_update_job(
@@ -375,9 +490,6 @@ def start_update_job(
     if not start_date or not end_date:
         raise ValueError("start_date/end_date or selected_dates is required")
 
-    JOB_DIR.mkdir(parents=True, exist_ok=True)
-    LOG_PATH.write_text("", encoding="utf-8")
-
     command = [
         sys.executable,
         "-m",
@@ -393,31 +505,19 @@ def start_update_job(
     if selected_dates:
         command.extend(["--dates", *selected_dates])
     command.extend(["--categories", ",".join(selected_categories)])
-    parent_pid = os.getpid()
-    command.extend(["--parent-pid", str(parent_pid)])
-    process = subprocess.Popen(
-        command,
-        cwd=BASE_DIR,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **_popen_creation_kwargs(),
-    )
     status = {
         "state": "running",
         "phase": "queued",
         "percent": 1,
         "message": "데이터 업데이트 작업을 시작했습니다.",
-        "pid": process.pid,
         "label": label,
         "start_date": start_date,
         "end_date": end_date,
         "selected_dates": selected_dates,
         "categories": selected_categories,
         "log_path": str(LOG_PATH),
-        "parent_pid": parent_pid,
     }
-    _write_status(status)
-    return status
+    return _start_detached_job(command=command, initial_status=status, label=label)
 
 
 def _run_subprocess(
@@ -475,15 +575,17 @@ def run_embedding_job(
     label: str,
     retry_extraction_failures: bool = False,
     parent_pid: int | None = None,
+    job_id: str | None = None,
 ) -> int:
     """Run an embedding-only job and persist progress status for the GUI."""
+    write_status = lambda status: _write_job_status(status, job_id=job_id)
     try:
         guard_before_retrieval_write(
             config.DATA_ROOT,
             allow_degraded_forward_recovery=True,
             allow_empty_preflight=True,
         )
-        _write_status(
+        write_status(
             {
                 "state": "running",
                 "phase": "embed",
@@ -507,7 +609,7 @@ def run_embedding_job(
                 return
             current, total, file_label = progress
             total = max(total, 1)
-            _write_status(
+            write_status(
                 {
                     "state": "running",
                     "phase": "embed",
@@ -541,7 +643,7 @@ def run_embedding_job(
             else f"{label}: 임베딩 작업이 완료되었습니다."
         )
 
-        _write_status(
+        write_status(
             {
                 "state": "succeeded",
                 "phase": "done",
@@ -557,7 +659,7 @@ def run_embedding_job(
         )
         return 0
     except Exception as exc:
-        _write_status(
+        write_status(
             {
                 "state": "failed",
                 "phase": "failed",
@@ -641,8 +743,10 @@ def run_update_job(
     selected_dates: list[str] | tuple[str, ...] | None = None,
     categories: str | list[str] | tuple[str, ...] | None = None,
     parent_pid: int | None = None,
+    job_id: str | None = None,
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
+    write_status = lambda status: _write_job_status(status, job_id=job_id)
     try:
         guard_before_retrieval_write(
             config.DATA_ROOT,
@@ -666,7 +770,7 @@ def run_update_job(
 
         for index, (range_start, range_end) in enumerate(date_ranges, start=1):
             percent = 10 + int(((index - 1) / max(len(date_ranges), 1)) * 50)
-            _write_status(
+            write_status(
                 {
                     "state": "running",
                     "phase": "download",
@@ -691,7 +795,7 @@ def run_update_job(
             if code != 0:
                 raise RuntimeError(f"crawler failed with exit code {code}")
 
-        _write_status(
+        write_status(
             {
                 "state": "running",
                 "phase": "embed",
@@ -719,7 +823,7 @@ def run_update_job(
             current, total, file_label = progress
             total = max(total, 1)
             percent = min(98, 70 + int((current / total) * 28))
-            _write_status(
+            write_status(
                 {
                     "state": "running",
                     "phase": "embed",
@@ -755,7 +859,7 @@ def run_update_job(
             else f"{label}: 데이터 업데이트가 완료되었습니다."
         )
 
-        _write_status(
+        write_status(
             {
                 "state": "succeeded",
                 "phase": "done",
@@ -774,7 +878,7 @@ def run_update_job(
         )
         return 0
     except Exception as exc:
-        _write_status(
+        write_status(
             {
                 "state": "failed",
                 "phase": "failed",
@@ -804,10 +908,12 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--dates", nargs="*")
     run_parser.add_argument("--categories", default="")
     run_parser.add_argument("--parent-pid", type=int)
+    run_parser.add_argument("--job-id")
     embed_parser = subparsers.add_parser("embed")
     embed_parser.add_argument("--label", required=True)
     embed_parser.add_argument("--retry-extraction-failures", action="store_true")
     embed_parser.add_argument("--parent-pid", type=int)
+    embed_parser.add_argument("--job-id")
     args = parser.parse_args(argv)
 
     if args.command == "run":
@@ -818,12 +924,14 @@ def main(argv: list[str] | None = None) -> int:
             selected_dates=args.dates,
             categories=args.categories or None,
             parent_pid=args.parent_pid,
+            job_id=args.job_id,
         )
     if args.command == "embed":
         return run_embedding_job(
             label=args.label,
             retry_extraction_failures=args.retry_extraction_failures,
             parent_pid=args.parent_pid,
+            job_id=args.job_id,
         )
     return 1
 

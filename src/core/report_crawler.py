@@ -1,8 +1,10 @@
 import os
 import re
+import tempfile
 from datetime import datetime, date, timedelta
 from pathlib import Path
 import sys
+from urllib.parse import urlparse
 
 # 프로젝트 루트 경로를 참조할 수 있도록 설정
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -10,10 +12,59 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".
 from src.retrieval.update_lock import RetrievalUpdateLock
 
 REPORT_CATEGORY_URLS = {
-    "company": "/research/company_list.naver",
-    "industry": "/research/industry_list.naver",
-    "economy": "/research/economy_list.naver",
+    "company": "/api/stockSecurity/researches/v2/company",
+    "industry": "/api/stockSecurity/researches/v2/industry",
+    "economy": "/api/stockSecurity/researches/v2/economy",
 }
+
+NAVER_REQUEST_TIMEOUT_SECONDS = 30
+NAVER_RESEARCH_PAGE_SIZE = 50
+
+
+def _is_valid_pdf_file(path: str | os.PathLike[str]) -> bool:
+    """Return whether *path* contains a readable, non-empty PDF document."""
+
+    import fitz
+
+    try:
+        with open(path, "rb") as source_file:
+            if source_file.read(5) != b"%PDF-":
+                return False
+        with fitz.open(filename=str(path), filetype="pdf") as document:
+            return document.page_count > 0 and not document.needs_pass
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _save_pdf_atomically(
+    destination: str | os.PathLike[str],
+    content: bytes,
+) -> None:
+    """Validate and atomically publish downloaded PDF bytes."""
+
+    destination_path = Path(destination)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=destination_path.parent,
+            prefix=f".{destination_path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
+        if not _is_valid_pdf_file(temp_path):
+            raise ValueError("응답이 유효한 PDF 문서가 아닙니다.")
+
+        os.replace(temp_path, destination_path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
 def guard_before_report_download():
@@ -130,10 +181,11 @@ def _download_naver_reports_locked(
     categories: str | list[str] | tuple[str, ...] | None = None,
 ):
     import requests
-    from bs4 import BeautifulSoup
 
     total_processed = 0
-    base_url = "https://finance.naver.com"
+    failed_download_count = 0
+    first_download_error: str | None = None
+    base_url = "https://stock.naver.com"
     stop_all_categories = False
     target_count = max(0, int(target_count or 0))
     lookback_days = max(0, int(lookback_days or 0))
@@ -191,47 +243,75 @@ def _download_naver_reports_locked(
         print(f"👉 탐색 시작: {r_type.upper()} ({list_url})")
         print(f"==========================================")
         
-        page = 1
+        page = 0
         stop_crawling = False
+        seen_report_ids: set[str] = set()
         
         while not stop_crawling:
             # print(f"--- {page}페이지 탐색 중 ---")
-            params = {'page': page}
-            res = requests.get(list_url, headers=headers, params=params)
-            res.encoding = 'euc-kr'  # 네이버 금융은 한글 깨짐 방지를 위해 euc-kr 지정 필요
-            soup = BeautifulSoup(res.text, 'html.parser')
+            params: dict[str, int | str] = {
+                "index": page,
+                "size": NAVER_RESEARCH_PAGE_SIZE,
+            }
+            if isinstance(target_date, date) and isinstance(start_date, date):
+                params.update(
+                    startDate=start_date.isoformat(),
+                    endDate=target_date.isoformat(),
+                )
+            res = requests.get(
+                list_url,
+                headers=headers,
+                params=params,
+                timeout=NAVER_REQUEST_TIMEOUT_SECONDS,
+            )
+            res.raise_for_status()
+            try:
+                payload = res.json()
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Naver research list returned invalid JSON: {r_type} page {page}"
+                ) from exc
 
-            # 리포트 목록이 있는 테이블 탐색
-            table = soup.find('table', class_='type_1')
-            if not table:
-                break
-            
-            rows = table.find_all('tr')
-            valid_rows_found = False
+            if not isinstance(payload, dict):
+                raise RuntimeError(
+                    f"Naver research list returned an invalid object: {r_type} page {page}"
+                )
+            rows = payload.get("items")
+            has_next = payload.get("hasNext")
+            if not isinstance(rows, list) or not isinstance(has_next, bool):
+                raise RuntimeError(
+                    f"Naver research list schema changed: {r_type} page {page}"
+                )
+            if not rows and has_next:
+                raise RuntimeError(
+                    f"Naver research pagination made no progress: {r_type} page {page}"
+                )
+            new_report_ids = 0
             
             for row in rows:
-                tds = row.find_all('td')
-                
-                # 데이터 행의 td 개수는 게시판마다 다름
-                # Company/Industry는 6개, Economy는 5개
-                if r_type in ["company", "industry"] and len(tds) < 6:
+                if not isinstance(row, dict):
+                    raise RuntimeError(
+                        f"Naver research item schema changed: {r_type} page {page}"
+                    )
+                report_id = str(row.get("nid") or "").strip()
+                if not report_id:
+                    raise RuntimeError(
+                        f"Naver research item is missing nid: {r_type} page {page}"
+                    )
+                if report_id in seen_report_ids:
                     continue
-                if r_type == "economy" and len(tds) < 5:
-                    continue
+                seen_report_ids.add(report_id)
+                new_report_ids += 1
                 
-                valid_rows_found = True
-                
-                # 날짜 인덱스는 Economy일 경우 다름
-                if r_type == "economy":
-                    date_text = tds[3].text.strip()
-                else:
-                    date_text = tds[4].text.strip()
+                date_text = str(row.get("writeDate") or "").strip()
                     
                 try:
-                    # 네이버 날짜 형식(YY.MM.DD)을 날짜 객체로 변환
-                    report_date = datetime.strptime(date_text, "%y.%m.%d").date()
-                except ValueError:
-                    continue
+                    # 새 연구 API는 ISO 날짜(YYYY-MM-DD)를 반환한다.
+                    report_date = datetime.strptime(date_text, "%Y-%m-%d").date()
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"Naver research item has an invalid writeDate: {r_type}/{report_id}"
+                    ) from exc
                 
                 # 타겟 날짜가 명시되지 않은 경우, 첫 번째로 발견한 게시물의 날짜를 기준일로 설정
                 if not target_date_str and global_latest_date is None:
@@ -250,31 +330,19 @@ def _download_naver_reports_locked(
                     stop_crawling = True
                     break
 
-                # PDF 링크 추출
-                if r_type == "economy":
-                    file_td = tds[2]
-                else:
-                    file_td = tds[3]
-                    
-                pdf_a = file_td.find('a', href=re.compile(r'.*\.pdf', re.IGNORECASE))
-                if not pdf_a:
-                    continue  # 첨부 PDF가 없는 리포트는 건너뜀
-
-                pdf_url = pdf_a.get('href')
-
                 # 타겟명, 제목, 증권사 추출
                 if r_type == "company":
-                    target_name = tds[0].text.strip()
-                    title_text = tds[1].text.strip()
-                    broker = tds[2].text.strip()
+                    target_name = str(row.get("itemName") or "").strip()
                 elif r_type == "industry":
-                    target_name = tds[0].text.strip()
-                    title_text = tds[1].text.strip()
-                    broker = tds[2].text.strip()
+                    target_name = str(row.get("industryKoreanName") or "").strip()
                 elif r_type == "economy":
                     target_name = "null"  # 경제는 타겟이 없음
-                    title_text = tds[0].text.strip()
-                    broker = tds[1].text.strip()
+                title_text = str(row.get("title") or "").strip()
+                broker = str(row.get("brokerName") or "").strip()
+                if not title_text or not broker or (r_type != "economy" and not target_name):
+                    raise RuntimeError(
+                        f"Naver research item is missing filename metadata: {r_type}/{report_id}"
+                    )
 
                 # 파일명 규칙: '[유형]_[YYYY-MM-DD]_[대상]_[증권사]_[제목].pdf'
                 # 언더스코어(_)를 파싱 토큰으로 쓰기 때문에, 각 데이터 내의 언더스코어는 하이픈(-)으로 치환
@@ -291,15 +359,42 @@ def _download_naver_reports_locked(
                 file_name = f"{s_type}_{report_date}_{s_target}_{s_broker}_{s_title}.pdf"
                 file_path = os.path.join(save_dir, file_name)
 
-                # 중복 다운로드 방지
-                if not os.path.exists(file_path):
+                # 유효한 기존 파일만 중복 다운로드 대상으로 인정
+                if not _is_valid_pdf_file(file_path):
                     print(f"  ✅ 다운로드: [{s_type}|{s_broker}] {s_target[:10]} - {s_title[:30]}")
                     try:
-                        pdf_res = requests.get(pdf_url, headers=headers)
-                        with open(file_path, 'wb') as f:
-                            f.write(pdf_res.content)
+                        detail_res = requests.get(
+                            f"{list_url}/{report_id}",
+                            headers=headers,
+                            timeout=NAVER_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        detail_res.raise_for_status()
+                        try:
+                            detail = detail_res.json()
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError("상세 API가 올바른 JSON을 반환하지 않았습니다.") from exc
+                        if not isinstance(detail, dict):
+                            raise ValueError("상세 API 응답 형식이 올바르지 않습니다.")
+                        pdf_url = detail.get("attachUrl")
+                        parsed_pdf_url = urlparse(pdf_url) if isinstance(pdf_url, str) else None
+                        if (
+                            parsed_pdf_url is None
+                            or parsed_pdf_url.scheme not in {"http", "https"}
+                            or not parsed_pdf_url.netloc
+                        ):
+                            raise ValueError("상세 API 응답에 유효한 첨부 URL이 없습니다.")
+                        pdf_res = requests.get(
+                            pdf_url,
+                            headers=headers,
+                            timeout=NAVER_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        pdf_res.raise_for_status()
+                        _save_pdf_atomically(file_path, pdf_res.content)
                         total_processed += 1
                     except Exception as e:
+                        failed_download_count += 1
+                        if first_download_error is None:
+                            first_download_error = f"{file_name}: {e}"
                         print(f"  ❌ 다운로드 실패: {e}")
                 else:
                     print(f"  ⏭ 이미 존재: {file_name}")
@@ -311,11 +406,22 @@ def _download_naver_reports_locked(
                     stop_all_categories = True
                     break
 
-            # 페이지 내 유효한 데이터가 없으면 종료
-            if not valid_rows_found:
+            # API가 더 이상 페이지를 제공하지 않으면 종료한다.
+            if stop_crawling or not has_next:
                 break
+            if new_report_ids == 0:
+                raise RuntimeError(
+                    f"Naver research pagination made no progress: {r_type} page {page}"
+                )
                 
-            page += 1 # 다음 페이지로 이동
+            page += 1  # 다음 페이지로 이동
+
+    if failed_download_count:
+        raise RuntimeError(
+            "리포트 다운로드에 실패했습니다. "
+            f"(실패: {failed_download_count}건, 성공 또는 기존 파일: {total_processed}건, "
+            f"첫 오류: {first_download_error})"
+        )
 
     print(f"\n✅ 모든 카테고리 다운로드가 완료되었습니다. (처리된 리포트: {total_processed}건)")
     return total_processed

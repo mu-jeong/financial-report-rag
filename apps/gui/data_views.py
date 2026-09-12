@@ -384,12 +384,16 @@ def render_data_update_controls(db_status: dict) -> None:
                 disabled=job_active,
                 width="stretch",
             ):
-                data_update_jobs.start_update_job(
-                    selected_dates=target_dates,
-                    categories=selected_categories,
-                    label=f"선택 기간 {len(target_dates)}일 ({', '.join(selected_categories)})",
-                )
-                st.rerun()
+                try:
+                    data_update_jobs.start_update_job(
+                        selected_dates=target_dates,
+                        categories=selected_categories,
+                        label=f"선택 기간 {len(target_dates)}일 ({', '.join(selected_categories)})",
+                    )
+                except data_update_jobs.DataUpdateJobAlreadyRunning:
+                    st.warning("다른 데이터 업데이트 작업이 이미 실행 중입니다.")
+                else:
+                    st.rerun()
         elif selected_categories:
             st.caption("선택 기간 내 업데이트할 임베딩 미완료 평일이 없습니다.")
     else:
@@ -488,11 +492,15 @@ def render_unembedded_reports(status: dict) -> None:
         ),
         width="stretch",
     ):
-        data_update_jobs.start_embedding_job(
-            label=button_label,
-            retry_extraction_failures=native_retry_ready,
-        )
-        st.success("임베딩 작업을 시작했습니다. 아래 진행 상태를 확인하세요.")
-        st.rerun(scope="app")
+        try:
+            data_update_jobs.start_embedding_job(
+                label=button_label,
+                retry_extraction_failures=native_retry_ready,
+            )
+        except data_update_jobs.DataUpdateJobAlreadyRunning:
+            st.warning("다른 데이터 업데이트 작업이 이미 실행 중입니다.")
+        else:
+            st.success("임베딩 작업을 시작했습니다. 아래 진행 상태를 확인하세요.")
+            st.rerun(scope="app")
 
     render_update_progress()

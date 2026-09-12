@@ -30,6 +30,8 @@ update_message = conversation_store.update_message
 
 
 CHAT_RESPONSE_TIMEOUT_SECONDS = 180.0
+_SESSION_OWNER_KEY = "_chat_job_owner_id"
+_MAX_RETAINED_CHAT_JOB_EVENTS = 1024
 
 
 class _LazyGraphApp:
@@ -135,6 +137,7 @@ def _chat_job_registry() -> dict:
     return {
         "running_job_ids": set(),
         "events": [],
+        "event_retention_limit": _MAX_RETAINED_CHAT_JOB_EVENTS,
         "lock": threading.Lock(),
     }
 
@@ -142,14 +145,40 @@ def _chat_job_registry() -> dict:
 def _record_chat_job_event(event: dict, registry: dict | None = None) -> None:
     registry = registry or _chat_job_registry()
     with registry["lock"]:
-        registry["events"].append(event)
+        events = registry["events"]
+        events.append(event)
+        retention_limit = max(1, int(registry.get("event_retention_limit", 1024)))
+        if len(events) > retention_limit:
+            del events[:-retention_limit]
 
 
-def consume_chat_job_events() -> list[dict]:
+def _chat_job_owner_id() -> str:
+    """Return the stable owner id for the current Streamlit session."""
+    owner_id = st.session_state.get(_SESSION_OWNER_KEY)
+    if not isinstance(owner_id, str) or not owner_id:
+        owner_id = uuid.uuid4().hex
+        st.session_state[_SESSION_OWNER_KEY] = owner_id
+    return owner_id
+
+
+def consume_chat_job_events(owner_id: str | None = None) -> list[dict]:
+    """Consume only events owned by one session.
+
+    ``None`` is retained for legacy/test producers that did not attach an owner.
+    It intentionally does not fall back to draining all process-wide events.
+    """
     registry = _chat_job_registry()
     with registry["lock"]:
-        events = list(registry["events"])
-        registry["events"].clear()
+        events = [
+            event
+            for event in registry["events"]
+            if event.get("owner_id") == owner_id
+        ]
+        registry["events"][:] = [
+            event
+            for event in registry["events"]
+            if event.get("owner_id") != owner_id
+        ]
     return events
 
 
@@ -307,6 +336,7 @@ def _invoke_graph_with_timeout(
 def _run_chat_response_job(
     *,
     job_id: str,
+    owner_id: str | None = None,
     thread_id: str,
     thread_name: str,
     assistant_message_id: int,
@@ -331,8 +361,10 @@ def _run_chat_response_job(
             )
             was_pending = job_id in pending_job_ids
             if was_pending:
-                registry.setdefault("events", []).append(
+                events = registry.setdefault("events", [])
+                events.append(
                     {
+                        **({"owner_id": owner_id} if owner_id else {}),
                         "status": "progress",
                         "thread_id": thread_id,
                         "thread_name": thread_name,
@@ -340,6 +372,12 @@ def _run_chat_response_job(
                         "engine_queue_released": True,
                     }
                 )
+                retention_limit = max(
+                    1,
+                    int(registry.get("event_retention_limit", 1024)),
+                )
+                if len(events) > retention_limit:
+                    del events[:-retention_limit]
             pending_job_ids.discard(job_id)
         engine_queue_released = True
         return was_pending
@@ -421,6 +459,7 @@ def _run_chat_response_job(
         )
         _record_chat_job_event(
             {
+                **({"owner_id": owner_id} if owner_id else {}),
                 "status": "succeeded",
                 "thread_id": thread_id,
                 "thread_name": thread_name,
@@ -457,6 +496,7 @@ def _run_chat_response_job(
         )
         _record_chat_job_event(
             {
+                **({"owner_id": owner_id} if owner_id else {}),
                 "status": "failed",
                 "thread_id": thread_id,
                 "thread_name": thread_name,
@@ -479,6 +519,7 @@ def start_chat_response_job(
     prior_search_scope: dict | None = None,
 ) -> int:
     job_id = str(uuid.uuid4())
+    owner_id = _chat_job_owner_id()
     chat_history = get_chat_history(thread_id)
     engine_state = search_engine.get_search_engine_status()["state"]
     waiting_for_engine = engine_state != "ready"
@@ -519,6 +560,7 @@ def start_chat_response_job(
             target=_run_chat_response_job,
             kwargs={
                 "job_id": job_id,
+                "owner_id": owner_id,
                 "thread_id": thread_id,
                 "thread_name": thread_name,
                 "assistant_message_id": assistant_message_id,
@@ -546,6 +588,7 @@ def start_chat_response_job(
         )
         _record_chat_job_event(
             {
+                "owner_id": owner_id,
                 "status": "failed",
                 "thread_id": thread_id,
                 "thread_name": thread_name,
@@ -561,7 +604,8 @@ def start_chat_response_job(
 @st.fragment(run_every=2.0)
 def render_chat_job_notifications(current_thread_id: str) -> None:
     should_refresh_app = False
-    for event in consume_chat_job_events():
+    owner_id = _chat_job_owner_id()
+    for event in consume_chat_job_events(owner_id):
         if event.get("status") in {"succeeded", "failed"}:
             _queue_chat_job_toast(event)
         if event.get("engine_queue_released"):

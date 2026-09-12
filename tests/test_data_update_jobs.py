@@ -1,5 +1,6 @@
 from datetime import date
 import os
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -338,6 +339,7 @@ def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
     monkeypatch.setattr(
         data_update_jobs,
         "guard_before_retrieval_write",
@@ -353,7 +355,8 @@ def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_
 
     command = captured["command"]
     assert isinstance(command, list)
-    assert command[-2:] == ["--parent-pid", "1234"]
+    assert command[command.index("--parent-pid") + 1] == "1234"
+    assert command[command.index("--job-id") + 1] == status["job_id"]
     assert status["pid"] == 4321
     assert status["parent_pid"] == 1234
     assert data_update_jobs.read_status()["parent_pid"] == 1234
@@ -373,6 +376,7 @@ def test_start_embedding_job_records_parent_pid(monkeypatch, tmp_path):
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
     monkeypatch.setattr(
         data_update_jobs,
         "guard_before_retrieval_write",
@@ -386,7 +390,8 @@ def test_start_embedding_job_records_parent_pid(monkeypatch, tmp_path):
     command = captured["command"]
     assert isinstance(command, list)
     assert command[:3] == [data_update_jobs.sys.executable, "-m", "src.core.data_update_jobs"]
-    assert command[-2:] == ["--parent-pid", "1234"]
+    assert command[command.index("--parent-pid") + 1] == "1234"
+    assert command[command.index("--job-id") + 1] == status["job_id"]
     assert status["phase"] == "embed"
     assert status["pid"] == 9876
     assert data_update_jobs.read_status()["parent_pid"] == 1234
@@ -408,6 +413,7 @@ def test_start_embedding_job_forwards_explicit_native_failure_retry(
     monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path)
     monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
     monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
     monkeypatch.setattr(
         data_update_jobs,
         "guard_before_retrieval_write",
@@ -425,3 +431,175 @@ def test_start_embedding_job_forwards_explicit_native_failure_retry(
     assert isinstance(command, list)
     assert "--retry-extraction-failures" in command
     assert status["retry_extraction_failures"] is True
+
+
+def test_start_jobs_share_one_atomic_admission_slot(monkeypatch, tmp_path):
+    launched_commands: list[list[str]] = []
+    launch_entered = threading.Event()
+    release_launch = threading.Event()
+    first_result: list[dict[str, object]] = []
+    first_errors: list[BaseException] = []
+
+    class FakeProcess:
+        pid = 4321
+
+    def fake_popen(command, **_kwargs):
+        launched_commands.append(command)
+        launch_entered.set()
+        assert release_launch.wait(timeout=2)
+        return FakeProcess()
+
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "jobs" / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "jobs" / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(data_update_jobs, "process_is_alive", lambda _pid: True)
+    monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fake_popen)
+
+    def launch_first():
+        try:
+            first_result.append(
+                data_update_jobs.start_update_job(
+                    label="업데이트",
+                    start_date="2026-06-03",
+                    end_date="2026-06-03",
+                )
+            )
+        except BaseException as exc:
+            first_errors.append(exc)
+
+    thread = threading.Thread(target=launch_first)
+    thread.start()
+    assert launch_entered.wait(timeout=2)
+
+    with pytest.raises(data_update_jobs.DataUpdateJobAlreadyRunning):
+        data_update_jobs.start_embedding_job(label="임베딩")
+
+    release_launch.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert not first_errors
+    assert first_result[0]["pid"] == 4321
+    assert len(launched_commands) == 1
+
+
+def test_start_job_reclaims_stale_running_status(monkeypatch, tmp_path):
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "jobs" / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "jobs" / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(data_update_jobs, "process_is_alive", lambda _pid: False)
+    monkeypatch.setattr(data_update_jobs.subprocess, "Popen", lambda *_args, **_kwargs: FakeProcess())
+    data_update_jobs._write_status({"state": "running", "pid": 999999, "job_id": "stale"})
+
+    status = data_update_jobs.start_embedding_job(label="새 작업")
+
+    assert status["state"] == "running"
+    assert status["pid"] == 4321
+    assert status["job_id"] != "stale"
+
+
+def test_failed_job_launch_releases_admission_and_records_failure(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "jobs" / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "jobs" / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        data_update_jobs.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("spawn failed")),
+    )
+
+    with pytest.raises(OSError, match="spawn failed"):
+        data_update_jobs.start_embedding_job(label="실패 작업")
+
+    status = data_update_jobs.read_status()
+    assert status is not None
+    assert status["state"] == "failed"
+    assert status["phase"] == "launch"
+    assert "spawn failed" in status["error"]
+    assert not data_update_jobs.is_update_job_active(status)
+
+
+def test_fast_child_completion_is_not_overwritten_by_parent_status(monkeypatch, tmp_path):
+    class FakeProcess:
+        pid = 4321
+
+    monkeypatch.setattr(data_update_jobs, "JOB_DIR", tmp_path / "jobs")
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "jobs" / "status.json")
+    monkeypatch.setattr(data_update_jobs, "LOG_PATH", tmp_path / "jobs" / "latest.log")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: None,
+    )
+
+    child_finished = threading.Event()
+
+    def fast_popen(command, **_kwargs):
+        job_id = command[command.index("--job-id") + 1]
+        def finish_child():
+            data_update_jobs._write_job_status(
+                {
+                    "state": "succeeded",
+                    "phase": "done",
+                    "percent": 100,
+                    "pid": 4321,
+                },
+                job_id=job_id,
+            )
+            child_finished.set()
+
+        threading.Thread(target=finish_child).start()
+        return FakeProcess()
+
+    monkeypatch.setattr(data_update_jobs.subprocess, "Popen", fast_popen)
+
+    status = data_update_jobs.start_embedding_job(label="빠른 작업")
+
+    assert status["state"] == "running"
+    assert child_finished.wait(timeout=2)
+    assert data_update_jobs.read_status()["state"] == "succeeded"
+
+
+def test_child_status_lock_io_failure_is_bounded(monkeypatch, tmp_path):
+    class BrokenLock:
+        def __init__(self, _data_root):
+            pass
+
+        def acquire(self):
+            try:
+                raise PermissionError("read-only filesystem")
+            except PermissionError as cause:
+                raise data_update_jobs.RetrievalUpdateLockError("lock unavailable") from cause
+
+    clock = iter((0.0, 6.0))
+    monkeypatch.setattr(data_update_jobs, "STATUS_PATH", tmp_path / "status.json")
+    monkeypatch.setattr(data_update_jobs.config, "DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(data_update_jobs, "_JobLaunchLock", BrokenLock)
+    monkeypatch.setattr(data_update_jobs.time, "monotonic", lambda: next(clock))
+
+    with pytest.raises(data_update_jobs.RetrievalUpdateLockError, match="lock unavailable"):
+        data_update_jobs._write_job_status(
+            {"state": "running"},
+            job_id="job-1",
+        )
