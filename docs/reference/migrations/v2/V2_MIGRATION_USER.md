@@ -7,6 +7,7 @@
 - 기존 Finance LLM GUI, CLI, 데이터 업데이트 창을 모두 닫습니다.
 - `.venv`와 `.env`가 프로젝트 루트에 있어야 합니다.
 - `DATA_ROOT`는 다음 표준 V1 구조를 사용해야 합니다.
+- `downloaded` 바로 아래의 PDF 목록은 V1 `reports.db`의 `file_name` 목록과 정확히 같아야 합니다. 누락된 PDF나 DB에 없는 추가 PDF가 있으면 마이그레이션을 중단합니다.
 
 ```text
 DATA_ROOT/
@@ -34,11 +35,11 @@ MIGRATE_V2.bat --data-root D:\path\to\data
 
 ## 수행되는 작업
 
-1. V1 `reports.db`, `index.faiss`, `index.pkl`의 구조와 개수가 서로 일치하는지 확인합니다.
+1. V1 `reports.db`, `index.faiss`, `index.pkl`의 구조와 개수, `downloaded` PDF 목록이 서로 일치하는지 확인하고 원본 해시를 기록합니다.
 2. V1 parent/child 청크와 기존 FAISS 벡터를 읽습니다.
 3. PDF를 다시 파싱하거나 전체 임베딩 API를 호출하지 않고 Native V2 candidate를 만듭니다.
 4. 현재 Native V2 게시 절차를 통해 쓰기 가능한 snapshot을 활성화합니다.
-5. 활성 snapshot과 기존 벡터값이 일치하는 것을 확인한 뒤 V1 `reports.db`와 `vector_db`를 삭제합니다.
+5. 활성 snapshot, 기존 벡터값, V1 및 PDF 원본 해시, 해당 snapshot의 cleanup marker가 모두 일치하는 것을 확인한 뒤 V1 `reports.db`와 `vector_db`를 삭제합니다.
 6. `downloaded` PDF는 이후 데이터 업데이트와 전체 재구축을 위해 유지합니다.
 
 ## 실패 및 재실행
@@ -46,6 +47,7 @@ MIGRATE_V2.bat --data-root D:\path\to\data
 - Native V2 활성화 전에 실패하면 V1 파일을 삭제하지 않습니다.
 - Native V2 활성화 후 V1 파일 삭제가 일부 실패하면 `MIGRATE_V2.bat`을 다시 실행하면 남은 V1 파일만 정리합니다.
 - 이미 Native V2가 정상 활성화된 상태에서 다시 실행해도 snapshot을 다시 만들지 않습니다.
+- 현재 활성 Native V2가 이 마이그레이션에서 만든 snapshot임을 증명하는 cleanup marker가 없거나 일치하지 않으면 V1 파일을 삭제하지 않습니다.
 - `reports.db-wal`, `reports.db-shm` 또는 `reports.db-journal`이 남아 있으면 실행 중인 V1 프로세스가 있을 수 있으므로 마이그레이션을 중단합니다.
 
 ## 삭제되는 항목
@@ -59,4 +61,4 @@ MIGRATE_V2.bat --data-root D:\path\to\data
 
 ## 전체 재구축과의 차이
 
-`MIGRATE_V2.bat`은 기존 V1 벡터를 재사용하는 일회성 전환 도구입니다. `tools\recovery\REBUILD_V2.bat`은 이미 활성화된 Native V2를 현재 추출·임베딩 설정으로 다시 생성하는 복구 도구이며, 전체 PDF 처리와 임베딩 비용이 발생할 수 있습니다.
+`MIGRATE_V2.bat`은 기존 V1 벡터를 재사용하는 일회성 전환 도구입니다. `tools\recovery\REBUILD_V2.bat`은 이미 활성화된 Native V2를 현재 추출·임베딩·청크 설정으로 다시 생성하는 복구 도구이며, 전체 PDF 처리와 임베딩 비용이 발생할 수 있습니다. 재구축의 `--check`는 추출 프로필만 비교하므로 모델이나 청크 설정만 바꾼 경우에는 `--force`가 필요합니다.

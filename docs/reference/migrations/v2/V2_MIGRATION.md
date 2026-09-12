@@ -1,32 +1,36 @@
-# V1 → Native V2 migration architecture
+# V1 → Native V2 마이그레이션 구조
 
-The supported migration is an offline, one-way import boundary. V1-specific
-SQLite, LangChain pickle, and FAISS knowledge lives only under
-`src/migrations/v2`; normal application and retrieval modules never select or
-query a V1 runtime.
+지원되는 마이그레이션은 앱을 중지한 상태에서 진행하는 단방향 가져오기 방식입니다.
+V1 전용 SQLite, LangChain pickle, FAISS 처리 코드는 `src/migrations/v2`와
+실행 진입점인 `scripts/migrations/v2/migrate_v2_user.py`에 분리되어 있습니다.
+일반 애플리케이션과 검색 모듈은 V1 런타임을 선택하거나 조회하지 않습니다.
 
 ```text
 V1 reports.db + index.pkl + index.faiss
-                 │ read only
-                 ▼
-       migration-only reconstruction
-                 │ same chunks and vectors
-                 ▼
-       current Native V2 candidate
-                 │ normal publication protocol
-                 ▼
-       writable Native V2 runtime
-                 │
-                 └─ retire reports.db and vector_db
+  │ 읽기 전용으로 접근
+  ▼
+마이그레이션 전용 데이터 재구성
+  │ 기존 청크와 벡터 재사용
+  ▼
+현재 규격의 Native V2 후보 스냅샷 생성
+  │ 정식 게시 절차 적용
+  ▼
+쓰기 가능한 Native V2 런타임 활성화
+  │
+  └─ 검증 후 reports.db와 vector_db 제거
 ```
 
-The importer reconstructs V1 parent/child spans and remaps the existing float32
-vectors to the dense positive physical IDs required by the native snapshot. It
-does not parse source PDFs, invoke an embedding provider, or retain a live V1
-fallback. The `downloaded` PDF corpus remains in place for later incremental
-updates and full rebuilds.
+가져오기 도구는 `reports.db`, LangChain 문서 저장소, FAISS 인덱스,
+`downloaded` 바로 아래의 PDF가 모두 같은 문서 집합을 나타내는지 검증합니다.
+V1 산출물과 원본 PDF의 해시를 계산하고, V1 부모·자식 청크의 범위를 재구성한 뒤,
+기존 float32 벡터를 Native V2 스냅샷에서 요구하는 연속된 양의 정수 물리 ID에
+다시 매핑합니다. 원본 PDF를 다시 파싱하거나 임베딩 서비스를 호출하지 않으며,
+문제 발생 시 V1 런타임으로 돌아가는 우회 경로도 남기지 않습니다.
+`downloaded`의 PDF는 이후 증분 업데이트와 전체 재구축에 사용할 수 있도록 유지합니다.
 
-Deletion is ordered after successful native publication and runtime inspection.
-Before publication, any failure leaves all V1 artifacts intact. If cleanup is
-interrupted after publication, rerunning the migration command detects the
-healthy Native V2 runtime and removes only the remaining known V1 artifacts.
+V1 산출물 삭제는 Native V2 게시, 런타임 점검, 정리 마커 검증이 모두 성공한 뒤에만
+진행합니다. 게시 전에 실패하면 모든 V1 산출물을 그대로 보존합니다.
+게시 후 정리 작업이 중단된 경우에는 마이그레이션 명령을 다시 실행할 수 있습니다.
+이때 정리 마커가 여전히 현재 활성 빌드를 가리키는 경우에만 정해진 삭제 대상 중
+남아 있는 V1 산출물을 제거합니다. 이 마이그레이션과 무관한 Native V2 스냅샷이
+있다는 이유만으로 V1 데이터를 삭제하지는 않습니다.

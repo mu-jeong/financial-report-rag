@@ -32,7 +32,7 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 ## 3. Quick Start가 자동으로 하는 일
 
 `RUN_QUICKSTART.bat`은 내부적으로 `scripts/quickstart.py`를 실행해 다음 작업을 순서대로 처리합니다.
-터미널에는 각 단계가 끝날 때마다 `[진행]` 프로그레스 바가 표시되어 현재 준비 상태를 확인할 수 있습니다.
+터미널에는 아래 10개 준비 단계가 끝날 때마다 `[진행]` 프로그레스 바가 표시되어 현재 상태를 확인할 수 있습니다. 리포트 수집 직전에는 retrieval runtime 쓰기 gate도 별도로 검증합니다.
 
 1. Python 버전 확인
 2. `.env` 파일 생성 또는 업데이트와 OpenRouter API 키 저장
@@ -40,11 +40,10 @@ API 키가 없다면 아래 문서를 먼저 따라 발급받으세요.
 4. 실행 산출물 폴더 생성 또는 확인 (`logs/`, `data/`, `data/downloaded/`, `reports/`)
 5. pip 업데이트
 6. `requirements.txt` 패키지 설치 또는 확인
-7. retrieval runtime의 쓰기 가능 상태 검증
-8. 실행일 포함 이전 7일 범위의 리포트 수집
-9. 전체 PDF 변경 여부를 검사해 새 문서와 변경된 문서만 파싱·임베딩하고 immutable Native V2 snapshot 게시
-10. 데이터 상태 출력
-11. Streamlit GUI 실행
+7. retrieval runtime의 쓰기 가능 상태를 검증한 뒤 실행일 포함 이전 7일 범위의 리포트 수집
+8. 전체 PDF 변경 여부를 검사해 새 문서와 변경된 문서만 파싱·임베딩하고 immutable Native V2 snapshot 게시
+9. 데이터 상태 출력
+10. Streamlit GUI 실행
 
 ## 4. 데이터 준비 기준
 
@@ -137,4 +136,4 @@ Quick Start 또는 위 명령으로 실행 중이고 화면이 정상 동작한�
 
 ### 비용이 걱정돼요
 
-Quick Start는 기본적으로 rerank를 끈 상태(`USE_RERANKER=false`)로 실행합니다. 그래도 OpenRouter API를 사용하므로 소액의 비용이 발생할 수 있습니다. 사용량은 OpenRouter 대시보드에서 확인하세요.
+새 `.env`로 시작하면 Quick Start는 rerank를 끈 상태(`USE_RERANKER=false`)로 실행합니다. 기존 `.env`에서 이 값을 명시적으로 켰다면 해당 설정을 유지합니다. 임베딩과 답변 생성에는 OpenRouter API를 사용하므로 비용이 발생할 수 있습니다. 사용량은 OpenRouter 대시보드에서 확인하세요.

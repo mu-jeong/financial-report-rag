@@ -3,7 +3,7 @@
 ## 현재 구현 운영 가이드
 
 원문 작성일: 2026년 7월 26일<br>
-재개정일: 2026년 9월 5일<br>
+재개정일: 2026년 9월 12일<br>
 대상: 제품 운영자 · 개발자 · 품질 검증 담당자<br>
 문서 목적: 사용자 신고 접수, 재현 자산 고정, 릴리스별 실행, 비교 판단, 이슈 종결을 현재 코드 기준으로 설명한다.
 
@@ -11,26 +11,65 @@
 
 ### 전체 동작 화면
 
-2026년 8월 31일 `http://localhost:8501/`에서 한 신고를 처음부터 끝까지 따라간 실제 화면이다. 아래 캡처는 읽기 전용 검증 기록이며, `신고 제출`·새 Run 실행·`불변 Comparison 저장`·`상태 변경 저장`은 누르지 않았다.
+2026년 9월 12일 현재 코드와 문서용 합성 fixture로 신고 접수부터 종결 준비까지 다시 캡처했다. 실제 사용자 신고나 운영 backend를 사용하지 않았고, 외부 시스템에 기록을 남기는 동작도 실행하지 않았다. 화면의 사람·회사·버전·답변·식별자는 모두 문서용 예시다.
 
-> **참고(2026-09-05):** 작업 공간 이름이 `재현 케이스`→`테스트 케이스 설정`, `버전 비교`→`개선 확인`으로 바뀌었고, 개선 확인 화면이 항상 Baseline·Candidate 2열로 시작해 각 열에서 실행·판단·종결한다. 아래 캡처와 단계 명칭은 이름 변경 전 화면이다.
+1. **Chat에서 신고 진입** — 문제가 발생한 응답에서 `신고`를 열고 신고 대상을 고른다.
 
-1. Chat에서 신고 진입 — 문제가 발생한 응답에서 `신고`를 연다.
-2. 신고 분류·동의·미리보기 — 원격 동의는 기본 해제, redaction 결과를 제출 전 확인.
-3. 작업함 선별 — 상태 필터·목록에서 Issue 선택.
-4. 신고 요약과 관측값 — 응답 속도·판단 상태·버전·route·동의 범위 확인.
-5. 다음 행동 — 재현 기록에서 `증상 재현됨`을 확인하고 Baseline·Candidate 비교로 이동.
-6. Fixture READY — 질문·기대 동작·typed check 고정 확인.
-7. FixedSnapshot·Lineage — Case가 READY이고 Snapshot revision·PARTIAL 범위가 고정됐는지 확인.
-8. Baseline 실행 — 신고 버전 `v0.6.1`의 성공·유효 Run 확인.
-9. Candidate 진입 — 개선 후보 `v0.6.1.1`과 비교 대상 Baseline 선택.
-10. 유효 Run 선택 — 양쪽 성공·유효 Run과 지연 중앙값 확인.
-11. 답변 비교 — Baseline은 `올해`를 2025, Candidate는 2026으로 해석.
-12. typed check 비교 — 같은 `ANSWER_CONTAINS: 2026` 검사가 양쪽에서 다르게 나옴.
-13. Comparison 판단 — 정성 verdict·근거 입력 준비 상태.
-14. Issue 종결 준비 — `해결됨으로 종료`와 사유 입력 준비 상태.
+   ![문서용 합성 대화에서 답변 문제 신고를 연 화면](../images/monitoring/loop-01-report-intake.png)
 
-각 단계의 실제 화면 캡처는 [`../images/monitoring/loop-*.png`](../images/monitoring/)에서 확인한다.
+2. **신고 분류·동의·미리보기** — 기본 해제된 원격 전송 항목을 고르고 redaction 결과를 제출 전에 확인한다. 이 예시는 촬영용 preview일 뿐 실제로 제출하지 않았다.
+
+   ![원격 전송 동의 항목과 redaction 미리보기](../images/monitoring/loop-02-report-consent.png)
+
+3. **작업함 선별** — 상태 필터와 목록에서 Issue를 선택하고 요약·동의된 원문·진행 상태를 확인한다. 화면의 원문은 합성 client가 반환한 예시이며 실제 원격 조회나 audit을 실행하지 않았다.
+
+   ![운영 Monitoring 작업함의 합성 신고](../images/monitoring/loop-03-work-inbox.png)
+
+4. **신고 분류와 조치 시작** — 신고 버전·route·관측값과 현재 재현·비교 상태를 함께 본다.
+
+   ![신고 요약과 현재 진행 상태](../images/monitoring/loop-04-work-triage.png)
+
+5. **다음 행동 확인** — Baseline에서 증상이 재현된 뒤 Candidate를 실행해야 한다는 안내를 확인한다.
+
+   ![재현 결과와 다음 행동 안내](../images/monitoring/loop-05-next-action.png)
+
+6. **Fixture READY 확인** — 질문·문제 증상·기대 동작·typed check와 수동 확인 항목이 고정됐는지 확인한다.
+
+   ![READY Fixture의 질문과 확인 기준](../images/monitoring/loop-06-fixture-ready.png)
+
+7. **FixedSnapshot·Lineage 확인** — 신고 당시 문서와 현재 고정 자료가 `EXACT`로 대응되고 Case가 READY인지 확인한다.
+
+   ![FixedSnapshot 범위와 ReconstructionLineage](../images/monitoring/loop-07-snapshot-lineage.png)
+
+8. **Baseline 결과 확인** — 신고 버전 `v0.6.1`의 `SUCCEEDED + VALID` Run이 `10조` 검사를 통과하지 못해 증상을 재현한 예시다.
+
+   ![신고 버전 Baseline Run 결과](../images/monitoring/loop-08-baseline-run.png)
+
+9. **Candidate 결과 확인** — 개선 후보 `v0.6.2`의 `SUCCEEDED + VALID` Run이 같은 검사와 인용 조건을 통과한 예시다.
+
+   ![개선 후보 Candidate Run 결과](../images/monitoring/loop-09-candidate-run.png)
+
+10. **개선 확인 전체 화면** — 같은 Case의 Baseline `v0.6.1`과 Candidate `v0.6.2` 실행 결과를 두 열에서 검토하고 판단에 사용할 Run을 고른다. 저장된 판단 이력은 접힌 영역에서 별도로 연다.
+
+    ![Baseline과 Candidate 실행 결과 및 Run 선택](../images/monitoring/loop-10-run-comparison.png)
+
+11. **답변·근거 비교** — Baseline의 `8조`와 Candidate의 `10조`, 양쪽 EvidenceRef를 나란히 본다.
+
+    ![Baseline과 Candidate의 답변 및 근거 비교](../images/monitoring/loop-11-answer-comparison.png)
+
+12. **typed check 비교** — 왼쪽 Baseline과 오른쪽 Candidate에서 같은 `ANSWER_CONTAINS: 10조`와 `CITATION_PRESENT` 결과가 어떻게 달라지는지 본다.
+
+    ![Baseline과 Candidate의 자동 검사 결과 비교](../images/monitoring/loop-12-check-comparison.png)
+
+13. **Comparison 판단 입력** — 정성 verdict와 판단 근거를 입력한다. 화면 값은 합성 registry로 렌더링한 예시이며 저장 버튼은 실제 backend에 연결되지 않는다.
+
+    ![Comparison verdict와 판단 근거 입력 영역](../images/monitoring/loop-13-verdict-form.png)
+
+14. **Issue 종결 준비** — 허용된 종결 상태와 사유 입력 영역을 확인한다. 촬영 과정에서는 실제 원격 상태를 변경하지 않았다.
+
+    ![이슈 종결 상태와 사유 입력 영역](../images/monitoring/loop-14-close-issue.png)
+
+촬영 조건과 재생성 명령은 [Monitoring 스크린샷 안내](../images/monitoring/README.md)에 있다.
 
 <!-- PAGE BREAK -->
 
@@ -60,7 +99,7 @@ Comparison    → IMPROVED | NOT_IMPROVED | REGRESSED | INCONCLUSIVE            
 | 4 | 미래 release 설계 (목표일 뿐 현재 동작 아님) |
 | 5 | historical plans·deliverables (의사결정 이력) |
 
-이 문서의 “구현됨”은 **2026년 8월 30일 로컬 코드·테스트 확인**을 뜻한다. hosted Supabase 적용이나 실제 운영 데이터 호환까지 확인했다는 뜻은 아니다.
+이 문서의 “구현됨”은 **2026년 9월 12일 로컬 코드·테스트 확인**을 뜻한다. hosted Supabase 적용이나 실제 운영 데이터 호환까지 확인했다는 뜻은 아니다.
 
 ## 1.2 다루는 것과 다루지 않는 것
 
@@ -112,7 +151,7 @@ Issue 상태 변경은 Supabase API만 호출한다. 로컬 registry의 Issue ro
 
 # 4. 신고와 안전한 수집
 
-사용자는 Chat `신고`에서 문제 응답 또는 화면·시스템 문제를 고르고 분류(답변 품질·검색 정확도·오답·속도·버그·기타)와 선택적 설명을 남긴다. 원격 내용 동의는 모두 기본 해제이며, 켜도 이전 assistant 답변 본문은 포함하지 않는다(최대 8개 user 질문·route·filter·문서 범위만).
+사용자는 Chat `신고`에서 문제 응답 또는 화면·시스템 문제를 고르고 분류(답변 품질·검색 정확도·오답·속도·버그·기타)와 선택적 설명을 남긴다. 원격 전송 동의는 모두 기본 해제이며 `추가 설명`, `선택한 질문과 응답`, `선택한 응답까지의 질문과 검색 상태`를 따로 선택한다. 마지막 항목은 최대 8개 turn의 user 질문·route·filter·문서 범위만 보내고 과거 assistant 답변 본문은 포함하지 않는다. 선택한 응답 본문은 `선택한 질문과 응답`에 별도로 동의한 경우에만 제한된 길이로 포함한다.
 
 제출 전에 credential·개인정보·로컬 절대경로를 가리고 실제 전송 형태의 redaction preview를 보여준 뒤, outbox에 durable enqueue가 성공해야만 `신고가 접수되었습니다.`를 표시한다. HTTP 전송·재시도는 background worker가 처리하며, 원격 기능이 꺼지면 로컬 파일로 우회하지 않고 제출을 비활성화한다.
 
@@ -123,7 +162,7 @@ Issue 상태 변경은 Supabase API만 호출한다. 로컬 registry의 Issue ro
 | 단일 event / outbox 전체 | 128 KiB / 50 MiB 또는 1,000건 |
 | 재시도 / lease / 만료 | 최대 3회 / 60초 / 7일 |
 | terminal 처리 | 성공·영구 거절·재시도 소진·만료 시 row·payload 삭제 |
-| ingest 검증 | publishable key, body size, exact schema, timestamp, 동의 일치, 민감정보 잔존, quota, `event_id` 멱등성 |
+| ingest 검증 | publishable key, body size, 지원 contract(v2·v3)의 exact schema, timestamp, 동의 일치, 민감정보 잔존, quota, `event_id` 멱등성 |
 
 <!-- PAGE BREAK -->
 
@@ -190,7 +229,7 @@ Comparison은 같은 Issue·`case_contract_id`의 Baseline·Candidate를 각각 
 
 # 8. 운영자 실행 절차
 
-**진입·인증:** production 설정(deplyment flag, Supabase URL·publishable key·operator URL·artifact root) 확인 → 활성 `private.monitoring_admins` 로그인 → access token은 session memory만, refresh token·비밀번호 미저장. 초기 admin은 배포 담당자가 migration 후 한 번 등록한다.
+**진입·인증:** production 설정(deployment flag, 같은 Supabase project의 URL·publishable key·operator URL, 설정에서 해석되는 artifact root) 확인 → 활성 `private.monitoring_admins` 로그인 → access token은 session memory만, refresh token·비밀번호 미저장. 초기 admin은 배포 담당자가 migration 후 한 번 등록한다.
 
 ```sql
 insert into private.monitoring_admins (user_id) values ('<auth.users.id>');
@@ -242,9 +281,9 @@ control projection은 로컬 자산 전체를 복제하지 않고, 어떤 identi
 
 `method_not_allowed`는 method를 GET으로 바꾸는 문제가 아니며 lifecycle API는 `/issues/{id}/start|resolve|dismiss|reopen`에 POST를 쓴다.
 
-## 11.1 알려진 FixedSnapshot 검색 표시 문제
+## 11.1 FixedSnapshot 검색 표시 해석
 
-`report_type=industry` filter가 있으면 industry 문서가 자동 제안되고, 직접 검색은 이미 선택된 UID를 “추가 가능” 결과에서 제외해 실제 문서가 있어도 0건처럼 보일 수 있다. broker 선택지도 report type으로 좁히지 않아 industry 문서가 없는 broker를 고를 수 있다. 운영 우회는 선택 목록 확인 → 0건을 catalog 0건으로 해석하지 않기 → broker `전체`로 되돌리기 → READY 전 범위 재검토다. 이는 검색 engine 부재가 아니라 선택·추가 가능 결과를 구분하지 못하는 UI 표시 문제다.
+`report_type=industry` filter가 있으면 industry 문서가 자동 제안된다. 직접 검색의 `추가할 수 있는 문서`는 이미 현재 Snapshot 범위에 들어간 UID를 제외한 건수이므로 0건이 전체 catalog 0건이라는 뜻은 아니다. 증권사 선택지는 문서 유형과 독립적으로 전체 활성 문서에서 만들기 때문에 조합에 따라 결과가 없을 수 있다. 먼저 `현재 Snapshot 범위`를 확인하고, 필요하면 증권사를 `전체`로 되돌린 뒤 READY 등록 전에 최종 범위를 검토한다.
 
 ## 11.2 알려진 계약 간격
 

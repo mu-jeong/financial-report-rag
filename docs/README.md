@@ -34,9 +34,10 @@
 
 | 문서 | 내용 |
 | --- | --- |
-| [MONITORING.md](operations/MONITORING.md) | Monitoring Mode 화면·지표·trace 세부 계약 |
+| [MONITORING.md](operations/MONITORING.md) | 개별 Chat 진단·운영 Monitoring 화면·지표·trace 세부 계약 |
 | [IMPROVEMENT_LOOP.md](operations/IMPROVEMENT_LOOP.md) | 신고 기반 개선 루프의 현재 구현 권위 문서 |
 | [CONTINUOUS_UPDATES.md](operations/CONTINUOUS_UPDATES.md) | Native V2 연속 검색 업데이트 결정 기록 |
+| [Monitoring 스크린샷](images/monitoring/README.md) | 문서용 합성 화면의 촬영 기준·재생성 방법 |
 
 ### reference — 참고 자료와 마이그레이션
 

@@ -59,6 +59,7 @@ Quick Start를 사용하면 `RUN_QUICKSTART.bat` 실행 중 입력한 API 키가
 | --- | --- |
 | `SEARCH_TOP_K` | 답변 파이프라인으로 넘길 vector search 결과 수 |
 | `SEARCH_CANDIDATE_MULTIPLIER` | retrieval과 rerank 전에 가져올 후보 수의 배수. 기본값은 `1`이며 후보 수는 `SEARCH_TOP_K × SEARCH_CANDIDATE_MULTIPLIER`로 계산 |
+| `VECTOR_RETRIEVAL_CONCURRENCY` | 복수 기업 비교에서 동시에 실행할 retrieval branch의 프로세스 전체 상한. 기본값은 `5`이며 실제 동시 실행 수는 대상 수와 이 값 중 작은 값 |
 | `RECENCY_WEIGHT` | 최신 리포트에 부여하는 검색 점수 가중치 |
 | `USE_PARENT_CHILD` | parent-child chunking 사용 여부 |
 | `PARENT_CHUNK_SIZE` | parent chunk 크기 |
@@ -99,6 +100,30 @@ Native V2의 chunk overlap은 별도 환경 설정이 아니라 각 parent·chil
 | `COMPANY_INDUSTRY_DATA_PATH` | KRX 업종 CSV 경로. 비워두면 `<PROJECT_ROOT>/data/listed_company_industries.csv` 사용 |
 
 임베딩 파이프라인과 다른 위치의 PDF를 열어야 하면 `.env`에서 `REPORT_PDF_DIR`을 해당 폴더로 지정합니다.
+
+## Monitoring 설정
+
+| 설정 | 설명 |
+| --- | --- |
+| `MONITORING_MODE` | 로컬 Chat 진단과 improvement experiment 화면 활성화 여부. 기본값은 `false` |
+| `DEPLOYMENT_ENVIRONMENT` | production 전용 운영자 화면의 배포 경계. 로컬 기본값은 `development` |
+| `MONITORING_SUPABASE_URL` | 운영자 이메일/비밀번호 인증에 사용하는 공개 Supabase project URL |
+| `MONITORING_SUPABASE_PUBLISHABLE_KEY` | 운영자 인증과 인증된 Edge Function 호출에 사용하는 공개 publishable key |
+| `MONITORING_OPERATOR_API_URL` | production 운영자 API의 인증된 Edge Function URL |
+| `MONITORING_ARTIFACT_ROOT` | release, FixedSnapshot, Run, registry artifact를 저장하는 로컬 root. 비워두면 `<DATA_ROOT>/monitoring` 사용 |
+
+`MONITORING_MODE=true`만으로 production 운영자 화면이 열리지는 않습니다. 운영자 화면은 `DEPLOYMENT_ENVIRONMENT=production`과 위 Supabase/operator 설정이 모두 필요합니다.
+
+## 문제 신고 전송 설정
+
+| 설정 | 설명 |
+| --- | --- |
+| `ISSUE_REPORT_REMOTE_ENABLED` | 사용자가 동의한 문제 신고를 원격 수신함에 보낼 수 있는지 결정. 기본값은 `true` |
+| `ISSUE_REPORT_INGEST_URL` | 중앙 신고 수집용 Supabase Edge Function URL |
+| `ISSUE_REPORT_PUBLISHABLE_KEY` | 신고 수집 Edge Function이 받는 공개 publishable key |
+| `ISSUE_REPORT_OUTBOX_DIR` | 전송 대기 SQLite outbox를 둘 폴더. 비워두면 `<DATA_ROOT>/issue-report-outbox` 사용 |
+
+원격 전송을 끄려면 `ISSUE_REPORT_REMOTE_ENABLED=false`로 설정합니다. 신고 payload는 사용자 동의를 받은 항목만 bounded envelope로 구성되며, 전송 대기 중에만 `issue-report-outbox.sqlite3`에 보관됩니다.
 
 ## 비용 참고
 

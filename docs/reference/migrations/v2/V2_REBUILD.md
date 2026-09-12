@@ -1,29 +1,43 @@
-# Native V2 full rebuild
+# Native V2 전체 재구축
 
-Use the full rebuild only when an active Native V2 installation must adopt a
-different extraction or embedding profile. Normal document additions and
-changes use the incremental update path and do not require this operation.
+전체 재구축은 활성 Native V2 환경의 모든 원본 문서를 현재 추출·임베딩·청크 설정으로
+다시 처리해야 할 때만 사용합니다. 일반적인 문서 추가와 변경은 증분 업데이트로
+처리하므로 전체 재구축이 필요하지 않습니다.
 
-First close the app and any data-update process, then run the read-only check:
+먼저 앱과 데이터 업데이트 프로세스를 모두 종료한 뒤, 데이터를 변경하지 않는
+사전 점검을 실행합니다.
 
 ```bat
 tools\recovery\REBUILD_V2.bat --check
 ```
 
-If the check reports that the active and target profiles already match, no
-action is required. Otherwise, verify the displayed profiles and run:
+사전 점검은 현재 활성 스냅샷의 추출 프로필과 설정된 추출 프로필만 비교하며,
+임베딩 모델이나 청크 설정은 비교하지 않습니다. `rebuild required`가 표시되면
+출력된 프로필을 확인한 뒤 다음 명령을 실행합니다.
 
 ```bat
 tools\recovery\REBUILD_V2.bat
 ```
 
-The rebuild processes the complete PDF corpus, so it can take time and incur
-embedding API charges. The current active snapshot remains available until a
-complete successor passes validation and is published atomically. Individual
-PDF extraction failures are recorded as exclusions; a systemic embedding,
-profile, manifest, or snapshot validation failure leaves the active snapshot
-unchanged.
+배치 파일은 `Y` 입력으로 진행 여부를 확인한 뒤 후속 스냅샷 생성 도구를 실행합니다.
+추출 프로필은 같지만 임베딩 모델이나 청크 설정을 변경한 경우에는 `--force`를
+명시해 재구축을 실행합니다.
 
-Do not delete or edit `DATA_ROOT/retrieval/v2` to force a rebuild. The supported
-entry point invokes `scripts/migrations/v2/rebuild_v2_successor.py` and keeps
-the recovery boundary explicit.
+```bat
+tools\recovery\REBUILD_V2.bat --force
+```
+
+`--force`가 없고 추출 프로필이 같으면 후속 스냅샷을 만들지 않고 정상 종료합니다.
+`--yes`는 Python 스크립트의 진행 확인만 생략하며, 추출 프로필이 같을 때 재구축을
+생략하는 조건을 해제하지는 않습니다. 배치 파일은 자체 진행 확인을 마친 뒤
+Python 스크립트에 `--yes`를 전달합니다.
+
+재구축은 설정된 `SAVE_DIR` 바로 아래의 모든 `*.pdf`를 처리하므로 시간이 걸리고
+임베딩 API 비용이 발생할 수 있습니다. 새로 만든 후속 스냅샷이 검증을 통과하고
+원자적으로 게시될 때까지 기존 활성 스냅샷은 계속 사용할 수 있습니다.
+개별 PDF의 추출 실패는 제외 항목으로 기록합니다. 임베딩 처리 전반의 오류나
+프로필·매니페스트·스냅샷 검증 실패가 발생하면 기존 활성 스냅샷을 유지합니다.
+
+재구축을 강제로 실행하려고 `DATA_ROOT/retrieval/v2`를 삭제하거나 수정하지 마세요.
+지원되는 배치 파일을 통해 `scripts/migrations/v2/rebuild_v2_successor.py`를 실행해야
+정해진 복구 절차를 따를 수 있습니다.

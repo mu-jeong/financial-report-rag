@@ -10,9 +10,9 @@ Finance LLM은 증권사 PDF 리포트를 수집, 추출, 색인하고 질문에
 | GUI 백그라운드 업데이트 | `src/core/data_update_jobs.py` |
 | PDF 추출 | `src/core/pdf_extraction.py`, `src/core/compare_pdf_extractors.py` (`pymupdf`, `opendataloader`, `docling`, `pdf-to-markdown`) |
 | 리포트/검색 메타데이터 | SQLite `DATA_ROOT/retrieval/v2/catalog.sqlite3` |
-| 대화 저장 | SQLite `data/conversations.db` |
+| 대화 저장 | SQLite `CONVERSATION_DB_PATH` (기본값 `data/conversations.db`) |
 | 임베딩 색인 | Immutable `DATA_ROOT/retrieval/v2/snapshots/<snapshot_id>.faiss` + catalog membership |
-| 문제 신고 전송 | 별도 SQLite outbox에 기록 후 Supabase 수신함으로 비동기 전송 |
+| 문제 신고 전송 | `ISSUE_REPORT_OUTBOX_DIR/issue-report-outbox.sqlite3`에 대기 이벤트를 기록한 뒤 Supabase 수신함으로 비동기 전송 |
 | 생성 모델 | OpenRouter `deepseek/deepseek-v4-flash` |
 | 임베딩 모델 | OpenRouter `baai/bge-m3` |
 | Rerank | 기본 비활성화, 필요 시 OpenRouter `cohere/rerank-v3.5` |
@@ -118,7 +118,7 @@ RERANK_MODEL=cohere/rerank-v3.5
 
 ## 8. 대화 장기 메모리
 
-`src/core/conversation_store.py`는 SQLite `data/conversations.db`에 thread와 message를 저장합니다.
+`src/core/conversation_store.py`는 SQLite `CONVERSATION_DB_PATH`에 thread와 message를 저장합니다. 설정을 비워두면 `data/conversations.db`를 사용합니다.
 
 - GUI는 저장된 thread와 메시지를 불러와 화면에 표시합니다.
 - GUI 답변 생성은 백그라운드 thread에서 실행되고, assistant 메시지는 먼저 `status=running`으로 저장된 뒤 완료 시 `status=succeeded`, 실패 시 `status=failed` metadata로 갱신됩니다.
@@ -129,7 +129,7 @@ RERANK_MODEL=cohere/rerank-v3.5
 
 ## 9. 문제 신고
 
-GUI의 `신고` 버튼은 `src/core/issue_report_store.py`에서 메모리 payload를 구성하고 `src/core/issue_report_outbox.py`를 통해 별도 SQLite outbox에 기록합니다. durable enqueue가 끝나면 사용자에게 접수 완료를 표시하고, HTTP 전송과 제한된 재시도는 백그라운드 worker가 담당합니다.
+GUI의 `신고` 버튼은 `src/core/issue_report_store.py`에서 메모리 payload를 구성하고 `src/core/issue_report_outbox.py`를 통해 `ISSUE_REPORT_OUTBOX_DIR/issue-report-outbox.sqlite3`에 기록합니다. `ISSUE_REPORT_OUTBOX_DIR`을 비워두면 `<DATA_ROOT>/issue-report-outbox`를 사용합니다. durable enqueue가 끝나면 사용자에게 접수 완료를 표시하고, HTTP 전송과 제한된 재시도는 백그라운드 worker가 담당합니다. 전송 완료·거절·만료 이벤트는 outbox에서 제거합니다.
 
 - 설명·선택 질문·응답·turn trace는 각각 별도 동의를 받아 포함하고, 전송 전에 민감정보와 로컬 경로를 redaction합니다.
 - 현재 GUI는 로컬 `.txt`/`.json` 신고 파일을 만들지 않으며 원격 접수가 비활성화되면 제출도 비활성화합니다.
