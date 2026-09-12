@@ -220,7 +220,15 @@ def render_report_calendar(db_status: dict) -> None:
     )
 
 
-def _step_icon(status_phase: str | None, step: str, state: str | None) -> str:
+def _step_icon(
+    status_phase: str | None,
+    step: str,
+    state: str | None,
+    *,
+    partial_failure: bool = False,
+    download_failure_count: int = 0,
+    embedding_failure_count: int = 0,
+) -> str:
     completed_by_phase = {
         "queued": set(),
         "download": set(),
@@ -230,6 +238,13 @@ def _step_icon(status_phase: str | None, step: str, state: str | None) -> str:
         "failed": set(),
     }
     if state == "succeeded":
+        if partial_failure:
+            if step == "done":
+                return "⚠️"
+            if step == "download" and download_failure_count:
+                return "⚠️"
+            if step == "embed" and embedding_failure_count:
+                return "⚠️"
         if status_phase == "no_data":
             return "✅" if step == "download" else "⏭️"
         return "✅"
@@ -240,6 +255,17 @@ def _step_icon(status_phase: str | None, step: str, state: str | None) -> str:
     if step == status_phase:
         return "⏳"
     return "•"
+
+
+def _status_step_icon(status: dict, step: str) -> str:
+    return _step_icon(
+        status.get("phase"),
+        step,
+        status.get("state"),
+        partial_failure=bool(status.get("partial_failure")),
+        download_failure_count=int(status.get("download_failure_count") or 0),
+        embedding_failure_count=int(status.get("embedding_failure_count") or 0),
+    )
 
 
 def _render_update_steps(status: dict) -> None:
@@ -257,7 +283,7 @@ def _render_update_steps(status: dict) -> None:
     st.markdown(
         "\n".join(
             f"<div style='font-size:0.78rem; line-height:1.35rem; color:#475569;'>"
-            f"{_step_icon(phase, step, state)} {label}</div>"
+            f"{_status_step_icon(status, step)} {label}</div>"
             for step, label in rows
         ),
         unsafe_allow_html=True,
@@ -287,7 +313,10 @@ def render_update_progress() -> None:
             )
         _render_update_steps(status)
     elif state == "succeeded":
-        st.success(message)
+        if status.get("partial_failure"):
+            st.warning(message)
+        else:
+            st.success(message)
         _render_update_steps(status)
     elif state == "failed":
         st.error(message)

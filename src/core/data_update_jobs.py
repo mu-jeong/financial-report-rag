@@ -651,6 +651,7 @@ def run_embedding_job(
                 "message": completion_message,
                 "label": label,
                 "embedding_failure_count": extraction_failure_count,
+                "partial_failure": bool(extraction_failure_count),
                 "retry_extraction_failures": retry_extraction_failures,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
@@ -735,6 +736,20 @@ def embedding_extraction_failure_count(output: str) -> int:
     )
 
 
+def crawler_download_summary(output: str) -> tuple[int, int]:
+    """Return the processed and failed counts emitted by the crawler."""
+
+    matches = re.findall(
+        r"^Naver research download complete: processed=(\d+) failed=(\d+)\s*$",
+        output,
+        flags=re.MULTILINE,
+    )
+    if not matches:
+        return 0, 0
+    processed, failed = matches[-1]
+    return int(processed), int(failed)
+
+
 def run_update_job(
     *,
     start_date: str | None,
@@ -747,6 +762,9 @@ def run_update_job(
 ) -> int:
     """Run crawler then embedding pipeline, updating status as each phase completes."""
     write_status = lambda status: _write_job_status(status, job_id=job_id)
+    download_processed_count = 0
+    download_failure_count = 0
+    extraction_failure_count = 0
     try:
         guard_before_retrieval_write(
             config.DATA_ROOT,
@@ -781,6 +799,8 @@ def run_update_job(
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
                     "categories": selected_categories,
+                    "download_processed_count": download_processed_count,
+                    "download_failure_count": download_failure_count,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "parent_pid": parent_pid,
@@ -792,6 +812,9 @@ def run_update_job(
                 env=crawler_env,
                 parent_pid=parent_pid,
             )
+            range_processed, range_failed = crawler_download_summary(output)
+            download_processed_count += range_processed
+            download_failure_count += range_failed
             if code != 0:
                 raise RuntimeError(f"crawler failed with exit code {code}")
 
@@ -810,6 +833,8 @@ def run_update_job(
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
                 "categories": selected_categories,
+                "download_processed_count": download_processed_count,
+                "download_failure_count": download_failure_count,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -835,6 +860,8 @@ def run_update_job(
                     "end_date": end_date,
                     "selected_dates": normalized_dates,
                     "categories": selected_categories,
+                    "download_processed_count": download_processed_count,
+                    "download_failure_count": download_failure_count,
                     "log_path": str(LOG_PATH),
                     "pid": os.getpid(),
                     "embedding_current": current,
@@ -849,15 +876,23 @@ def run_update_job(
             on_line=on_embed_line,
             parent_pid=parent_pid,
         )
+        extraction_failure_count = embedding_extraction_failure_count(output)
         if code != 0:
             raise RuntimeError(embedding_failure_message(code, output))
-        extraction_failure_count = embedding_extraction_failure_count(output)
-        completion_message = (
-            f"{label}: 업데이트는 완료했지만 파싱 실패 문서 "
-            f"{extraction_failure_count}건이 관리 목록에 남았습니다."
-            if extraction_failure_count
-            else f"{label}: 데이터 업데이트가 완료되었습니다."
-        )
+        partial_failure = bool(download_failure_count or extraction_failure_count)
+        if partial_failure:
+            failure_parts = []
+            if download_failure_count:
+                failure_parts.append(f"리포트 다운로드 {download_failure_count}건")
+            if extraction_failure_count:
+                failure_parts.append(f"문서 처리 {extraction_failure_count}건")
+            completion_message = (
+                f"{label}: 업데이트가 부분 완료되었습니다. "
+                f"{' 및 '.join(failure_parts)}이 실패했으며, "
+                "정상 처리 가능한 문서는 검색에 반영했습니다. 자세한 내용은 로그를 확인하세요."
+            )
+        else:
+            completion_message = f"{label}: 데이터 업데이트가 완료되었습니다."
 
         write_status(
             {
@@ -870,7 +905,10 @@ def run_update_job(
                 "end_date": end_date,
                 "selected_dates": normalized_dates,
                 "categories": selected_categories,
+                "download_processed_count": download_processed_count,
+                "download_failure_count": download_failure_count,
                 "embedding_failure_count": extraction_failure_count,
+                "partial_failure": partial_failure,
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,
@@ -889,6 +927,10 @@ def run_update_job(
                 "end_date": end_date,
                 "selected_dates": normalize_date_list(selected_dates),
                 "categories": normalize_update_categories(categories),
+                "download_processed_count": download_processed_count,
+                "download_failure_count": download_failure_count,
+                "embedding_failure_count": extraction_failure_count,
+                "partial_failure": bool(download_failure_count or extraction_failure_count),
                 "log_path": str(LOG_PATH),
                 "pid": os.getpid(),
                 "parent_pid": parent_pid,

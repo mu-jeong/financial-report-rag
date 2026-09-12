@@ -297,6 +297,27 @@ def test_data_view_pure_helpers_preserve_current_outputs():
     assert step_icon("embed", "embed", "running") == "⏳"
     assert step_icon("no_data", "embed", "succeeded") == "⏭️"
     assert step_icon("download", "download", "failed") == "❌"
+    assert step_icon(
+        "done",
+        "download",
+        "succeeded",
+        partial_failure=True,
+        download_failure_count=2,
+    ) == "⚠️"
+    assert step_icon(
+        "done",
+        "embed",
+        "succeeded",
+        partial_failure=True,
+        download_failure_count=2,
+    ) == "✅"
+    assert step_icon(
+        "done",
+        "done",
+        "succeeded",
+        partial_failure=True,
+        download_failure_count=2,
+    ) == "⚠️"
 
 
 def test_monitoring_view_pure_helpers_preserve_current_outputs():

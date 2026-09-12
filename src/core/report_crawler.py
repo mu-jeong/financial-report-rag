@@ -417,13 +417,16 @@ def _download_naver_reports_locked(
             page += 1  # 다음 페이지로 이동
 
     if failed_download_count:
-        raise RuntimeError(
-            "리포트 다운로드에 실패했습니다. "
+        print(
+            "⚠️ 리포트 다운로드가 일부 실패했습니다. 정상 파일 처리는 계속합니다. "
             f"(실패: {failed_download_count}건, 성공 또는 기존 파일: {total_processed}건, "
             f"첫 오류: {first_download_error})"
         )
 
-    print(f"\n✅ 모든 카테고리 다운로드가 완료되었습니다. (처리된 리포트: {total_processed}건)")
+    # Stable subprocess summary: item failures are distinct from fatal scan errors.
+    print(f"Naver research download complete: processed={total_processed} failed={failed_download_count}")
+    if not failed_download_count:
+        print(f"\n✅ 모든 카테고리 다운로드가 완료되었습니다. (처리된 리포트: {total_processed}건)")
     return total_processed
 
 # ==========================================

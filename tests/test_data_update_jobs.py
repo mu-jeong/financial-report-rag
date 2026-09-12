@@ -202,6 +202,13 @@ def test_embedding_extraction_failure_count_reads_native_summaries():
     ) == 4
 
 
+def test_crawler_download_summary_reads_machine_readable_completion():
+    assert data_update_jobs.crawler_download_summary(
+        "progress\nNaver research download complete: processed=7 failed=3\n"
+    ) == (7, 3)
+    assert data_update_jobs.crawler_download_summary("legacy output") == (0, 0)
+
+
 def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
     statuses: list[dict[str, object]] = []
     monkeypatch.setattr(
@@ -226,6 +233,7 @@ def test_embedding_job_surfaces_partial_extraction_completion(monkeypatch):
     assert data_update_jobs.run_embedding_job(label="재처리") == 0
     assert statuses[-1]["state"] == "succeeded"
     assert statuses[-1]["embedding_failure_count"] == 2
+    assert statuses[-1]["partial_failure"] is True
     assert "관리 목록에 남았습니다" in str(statuses[-1]["message"])
 
 
@@ -323,6 +331,133 @@ def test_run_update_job_native_runtime_embeds_and_compacts_with_no_new_downloads
         status.get("embedding_file") == "검색 데이터 정리" for status in statuses
     )
     assert statuses[-1]["phase"] == "done"
+
+
+def _stub_update_job_dependencies(monkeypatch, statuses):
+    monkeypatch.setattr(
+        data_update_jobs,
+        "guard_before_retrieval_write",
+        lambda *_args, **_kwargs: SimpleNamespace(is_native=True),
+    )
+    monkeypatch.setattr(data_update_jobs, "_write_status", statuses.append)
+
+
+def test_run_update_job_continues_embedding_when_all_item_downloads_fail(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    embedded: list[bool] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            0,
+            "Naver research download complete: processed=0 failed=3\n",
+        ),
+    )
+
+    def run_embedding(*_args, **_kwargs):
+        embedded.append(True)
+        return 0, "Native V2 update complete: deltas=0 compactions=0 failed=0\n"
+
+    monkeypatch.setattr(data_update_jobs, "_run_subprocess_stream", run_embedding)
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-09-11",
+        end_date="2026-09-11",
+        label="부분 업데이트",
+    ) == 0
+    assert embedded == [True]
+    assert statuses[-1]["state"] == "succeeded"
+    assert statuses[-1]["partial_failure"] is True
+    assert statuses[-1]["download_processed_count"] == 0
+    assert statuses[-1]["download_failure_count"] == 3
+    assert "리포트 다운로드 3건" in str(statuses[-1]["message"])
+    assert "다운로드 성공" not in str(statuses[-1]["message"])
+
+
+def test_run_update_job_accumulates_partial_downloads_across_ranges(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    crawler_results = iter(
+        [
+            (0, "Naver research download complete: processed=2 failed=1\n"),
+            (0, "Naver research download complete: processed=5 failed=2\n"),
+        ]
+    )
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: next(crawler_results),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (0, ""),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date=None,
+        end_date=None,
+        selected_dates=["2026-09-09", "2026-09-11"],
+        label="여러 구간",
+    ) == 0
+    assert statuses[-1]["download_processed_count"] == 7
+    assert statuses[-1]["download_failure_count"] == 3
+    embed_status = next(status for status in statuses if status.get("phase") == "embed")
+    assert embed_status["download_failure_count"] == 3
+
+
+def test_run_update_job_stops_on_fatal_crawler_failure(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (1, "fatal list response\n"),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: pytest.fail("embedding must not run"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-09-11",
+        end_date="2026-09-11",
+        label="치명적 실패",
+    ) == 1
+    assert statuses[-1]["state"] == "failed"
+    assert statuses[-1]["download_failure_count"] == 0
+    assert "crawler failed with exit code 1" in str(statuses[-1]["message"])
+
+
+def test_run_update_job_preserves_partial_count_when_embedding_fails(monkeypatch):
+    statuses: list[dict[str, object]] = []
+    _stub_update_job_dependencies(monkeypatch, statuses)
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: (
+            0,
+            "Naver research download complete: processed=2 failed=1\n",
+        ),
+    )
+    monkeypatch.setattr(
+        data_update_jobs,
+        "_run_subprocess_stream",
+        lambda *_args, **_kwargs: (5, "provider unavailable\n"),
+    )
+
+    assert data_update_jobs.run_update_job(
+        start_date="2026-09-11",
+        end_date="2026-09-11",
+        label="임베딩 실패",
+    ) == 1
+    assert statuses[-1]["state"] == "failed"
+    assert statuses[-1]["download_processed_count"] == 2
+    assert statuses[-1]["download_failure_count"] == 1
+    assert statuses[-1]["partial_failure"] is True
+    assert "embedding failed with exit code 5" in str(statuses[-1]["message"])
 
 
 def test_start_update_job_passes_parent_pid_and_records_status(monkeypatch, tmp_path):

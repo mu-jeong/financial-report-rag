@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
 
@@ -41,6 +42,14 @@ class _FakeResponse:
 
 
 API_BASE = "https://stock.naver.com/api/stockSecurity/researches/v2"
+
+
+@contextmanager
+def _expect_partial_download(capsys, processed=0):
+    yield
+    output = capsys.readouterr().out
+    assert f"Naver research download complete: processed={processed} failed=1" in output
+    assert "실패: 1건" in output
 
 
 def _report_item(**overrides):
@@ -149,8 +158,7 @@ def test_invalid_attachment_fails_without_pdf_request(tmp_path, monkeypatch, det
         return _FakeResponse(payload=detail)
     monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr("src.configs.config.SAVE_DIR", str(tmp_path))
-    with pytest.raises(RuntimeError):
-        report_crawler._download_naver_reports_locked("2026-07-18")
+    assert report_crawler._download_naver_reports_locked("2026-07-18") == 0
     assert len(calls) == 2
     assert list(tmp_path.iterdir()) == []
 
@@ -321,10 +329,10 @@ def test_crawl_start_date_prefers_explicit_lookback_window():
     ) == date(2026, 5, 24)
 
 
-def test_pdf_http_error_is_not_persisted_or_counted(tmp_path, monkeypatch):
+def test_pdf_http_error_is_not_persisted_or_counted(tmp_path, monkeypatch, capsys):
     calls = []
 
-    with pytest.raises(RuntimeError, match="실패: 1건"):
+    with _expect_partial_download(capsys):
         _run_mocked_company_download(
             tmp_path,
             monkeypatch,
@@ -361,10 +369,10 @@ def test_list_http_error_fails_before_parsing_or_writing(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_non_pdf_success_response_is_not_persisted_or_counted(tmp_path, monkeypatch):
+def test_non_pdf_success_response_is_not_persisted_or_counted(tmp_path, monkeypatch, capsys):
     calls = []
 
-    with pytest.raises(RuntimeError, match="실패: 1건"):
+    with _expect_partial_download(capsys):
         _run_mocked_company_download(
             tmp_path,
             monkeypatch,
@@ -375,7 +383,7 @@ def test_non_pdf_success_response_is_not_persisted_or_counted(tmp_path, monkeypa
     assert list(tmp_path.glob("*.pdf")) == []
 
 
-def test_pdf_timeout_is_not_persisted_or_counted(tmp_path, monkeypatch):
+def test_pdf_timeout_is_not_persisted_or_counted(tmp_path, monkeypatch, capsys):
     list_url = f"{API_BASE}/company"
     calls = []
 
@@ -390,7 +398,7 @@ def test_pdf_timeout_is_not_persisted_or_counted(tmp_path, monkeypatch):
     monkeypatch.setattr("requests.get", fake_get)
     monkeypatch.setattr("src.configs.config.SAVE_DIR", str(tmp_path))
 
-    with pytest.raises(RuntimeError, match="download timed out"):
+    with _expect_partial_download(capsys):
         report_crawler._download_naver_reports_locked(
             "2026-07-18",
             categories="company",
@@ -400,9 +408,10 @@ def test_pdf_timeout_is_not_persisted_or_counted(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
-def test_partial_download_failure_preserves_successes_but_fails_the_run(
+def test_partial_download_failure_preserves_successes_and_returns_count(
     tmp_path,
     monkeypatch,
+    capsys,
 ):
     list_url = f"{API_BASE}/company"
     good_url = "https://example.test/good.pdf"
@@ -423,11 +432,11 @@ def test_partial_download_failure_preserves_successes_but_fails_the_run(
     monkeypatch.setattr("requests.get", fake_get)
     monkeypatch.setattr("src.configs.config.SAVE_DIR", str(tmp_path))
 
-    with pytest.raises(RuntimeError, match="성공 또는 기존 파일: 1건"):
-        report_crawler._download_naver_reports_locked(
+    with _expect_partial_download(capsys, processed=1):
+        assert report_crawler._download_naver_reports_locked(
             "2026-07-18",
             categories="company",
-        )
+        ) == 1
 
     saved_reports = list(tmp_path.glob("*.pdf"))
     assert len(saved_reports) == 1
@@ -449,6 +458,27 @@ def test_list_and_pdf_requests_use_a_timeout(tmp_path, monkeypatch):
 
     assert len(calls) == 3
     assert all(call_kwargs.get("timeout") for _, call_kwargs in calls)
+
+
+def test_failed_category_does_not_block_next_category(tmp_path, monkeypatch, capsys):
+    def fake_get(url, **kwargs):
+        if url in (f"{API_BASE}/company", f"{API_BASE}/industry"):
+            return _list_response()
+        if url.startswith(API_BASE):
+            category = url.split("/")[-2]
+            return _FakeResponse(payload={"attachUrl": f"https://example.test/{category}.pdf"})
+        if url.endswith("company.pdf"):
+            return _FakeResponse(status_code=503)
+        return _FakeResponse(content=_valid_pdf_bytes())
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr("src.configs.config.SAVE_DIR", str(tmp_path))
+    with _expect_partial_download(capsys, processed=1):
+        assert report_crawler._download_naver_reports_locked(
+            "2026-07-18", categories=["company", "industry"]
+        ) == 1
+    files = list(tmp_path.glob("*.pdf"))
+    assert len(files) == 1 and files[0].name.startswith("industry_")
 
 
 def test_atomic_save_does_not_leave_partial_final_file_on_replace_error(
@@ -505,13 +535,13 @@ def test_corrupt_existing_pdf_is_replaced_with_valid_download(tmp_path, monkeypa
     assert expected_path.read_bytes() == valid_pdf
 
 
-def test_failed_repair_preserves_corrupt_existing_file(tmp_path, monkeypatch):
+def test_failed_repair_preserves_corrupt_existing_file(tmp_path, monkeypatch, capsys):
     expected_path = tmp_path / "company_2026-07-18_테스트기업_테스트증권_테스트제목.pdf"
     original_content = b"<html>old failed download</html>"
     expected_path.write_bytes(original_content)
     calls = []
 
-    with pytest.raises(RuntimeError, match="실패: 1건"):
+    with _expect_partial_download(capsys):
         _run_mocked_company_download(
             tmp_path,
             monkeypatch,
